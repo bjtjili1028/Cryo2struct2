@@ -1,50 +1,55 @@
-import torch
-import math
-import copy
-from torch import nn
-from einops import rearrange
-from functools import partial
-
-
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
-import torch.nn as nn
-from argparse import ArgumentParser
-from torch.utils.data import DataLoader
-from torch.utils.data import Dataset
-import os
-import numpy as np
-
-
-from pytorch_lightning.loggers import WandbLogger
-from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score, Dice
-
-
 """
 @author : nabin
 Combine atom and amino training together
 """
 
+import os
+import numpy as np
+
+import torch # 引入PyTorch深度學習框架
+import torch.nn as nn # 用於神經網絡層
+from einops import rearrange # 用於重排列張量的庫
+
+import pytorch_lightning as pl # 用於PyTorch的高層API
+# 用於早期停止、模型檢查點和學習率監控
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.loggers import WandbLogger
+from torch.utils.data import DataLoader # 用於加載數據
+from torch.utils.data import Dataset # 用於創建自定義數據集
+from argparse import ArgumentParser # 用於解析命令行參數
+# 用於多個指標計算
+from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score, Dice 
+
+# v2 新增的套件
+import math
+import copy
+from functools import partial
+
+# --------------------------------- 全局設定 ---------------------------------
+# 後面所有的 float32 matmul 都要用最高 FP32 精度，不要用 TF32 或混合精度，以換取最小的數值誤差。
 torch.set_float32_matmul_precision('high')
 
 AVAIL_GPUS = 4
-NUM_NODES = 1
+NUM_NODES = 1 # 使用的節點數量
 BATCH_SIZE = 310 * 4 * 1 # batch size * available GPU * number of nodes
-DATALOADERS = 4
-STRATEGY = "ddp"
+DATALOADERS = 4 # 數據加載器數量
+STRATEGY = "ddp" # 分布式訓練策略
 ACCELERATOR = "gpu"
-GPU_PLUGIN = "ddp_sharded"
-EPOCHS = 1000
+GPU_PLUGIN = "ddp_sharded" # 使用DDP分片插件
+EPOCHS = 1000 # 訓練輪數
+
+# 檢查點保存路徑
 CHECKPOINT_PATH_ATOM = "combined_atom_checkpoint_multitask_joint"
 CHECKPOINT_PATH_AMINO = "combined_amino_checkpoint_multitask_joint"
-os.makedirs(CHECKPOINT_PATH_ATOM, exist_ok=True)
-os.makedirs(CHECKPOINT_PATH_AMINO, exist_ok=True)
+os.makedirs(CHECKPOINT_PATH_ATOM, exist_ok=True)  # 如果路徑不存在則創建
+os.makedirs(CHECKPOINT_PATH_AMINO, exist_ok=True) # 如果路徑不存在則創建
 
-
+# 資料集的目錄
 DATASET_DIR = "/Cryo2StructData"
-TRAIN_SUB_GRIDS = "train_data_subgrids"
-VALID_SUB_GRIDS = "validation_data_subgrids"
+TRAIN_SUB_GRIDS = "train_data_subgrids" # 訓練數據的子目錄
+VALID_SUB_GRIDS = "validation_data_subgrids" # 驗證數據的子目錄
 
+# 讀取訓練和驗證數據集列表
 file = open(os.path.join(DATASET_DIR, 'train_subgrids.txt'))
 train_splits = file.readlines()
 print("Training Data file found and the number of protein graph splits are:", len(train_splits))
@@ -53,10 +58,12 @@ file = open(os.path.join(DATASET_DIR, 'valid_subgrids.txt'))
 valid_splits = file.readlines()
 print("Valid Data file found and the number of protein graph splits are:", len(valid_splits))
 
+# 計算模型中需要訓練的參數數量
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-
+# --------------------------------- 資料集類別 ---------------------------------
+# 定義數據集
 class CryoData(Dataset):
     def __init__(self, root, mode, transform=None, target_transform=None):
         self.root = root
@@ -73,37 +80,49 @@ class CryoData(Dataset):
         else:
             raise ValueError("Mode must be 'train' or 'valid'")
 
+    # 訓練集的長度
     def __len__(self):
         return len(self.data_splits)
 
     def __getitem__(self, idx):
-        cryodata = self.data_splits[idx].strip("\n")
-        loaded_data = np.load(f"{self.root}/{self.sub_grids_splits}/{cryodata}")
+        cryodata = self.data_splits[idx].strip("\n") # 讀取每個數據文件
+        loaded_data = np.load(f"{self.root}/{self.sub_grids_splits}/{cryodata}") # 加載網格數據
 
+        # 蛋白質網格
         protein_manifest = loaded_data['protein_grid']
         protein_torch = torch.from_numpy(protein_manifest).type(torch.FloatTensor)
 
+        # 原子網格
         atom_manifest = loaded_data['atom_grid']
         atom_torch = torch.from_numpy(atom_manifest).type(torch.FloatTensor)
 
+        # 氨基酸網格
         amino_manifest = loaded_data['amino_grid']
         amino_torch = torch.from_numpy(amino_manifest).type(torch.FloatTensor)
 
+        ################### v2 新增的
+        # 從已載入的 npz 檔案中取出 ESM 序列嵌入（embeddings），並轉為 PyTorch Tensor
         protein_embeds_torch = torch.tensor(loaded_data['embeddings'])
 
+        # 返回處理後的蛋白質和原子網格、氨基酸網格
         return [protein_torch, atom_torch, amino_torch, protein_embeds_torch]
 
+# --------------------------------- 損失權重計算 ---------------------------------
+# 計算原子類別的權重，用於處理類別不平衡問題
 def calc_ce_weights_atom(batch):
     y_zeros = (batch == 0.).sum()
     y_ones = (batch == 1.).sum()
     y_two = (batch == 2.).sum()
     y_three = (batch == 3.).sum()
     nSamples = [y_zeros, y_ones, y_two, y_three]
+    
+    # 計算每個類別的權重，較少的類別將會分配較高的權重
     normedWeights_1 = [1 - (x / sum(nSamples)) for x in nSamples]
-    normedWeights = [x + 1e-5 for x in normedWeights_1]
+    normedWeights = [x + 1e-5 for x in normedWeights_1] # 避免除零錯誤
     balance_weights = torch.FloatTensor(normedWeights).to("cuda")
     return balance_weights      
 
+# 計算胺基酸類別的權重，用於處理類別不平衡問題
 def calc_ce_weights_amino(batch):
     y_zeros = (batch == 0.).sum()
     y_ones = (batch == 1.).sum()
@@ -129,12 +148,36 @@ def calc_ce_weights_amino(batch):
     nSamples = [y_zeros, y_ones, y_two, y_three, y_four, y_five, y_six, y_seven, y_eight, y_nine, y_ten, y_eleven,
                 y_twelve,
                 y_thirteen, y_fourteen, y_fifteen, y_sixteen, y_seventeen, y_eighteen, y_nineteen, y_twenty]
+    
+    # 計算每個類別的權重，較少的類別將會分配較高的權重
     normedWeights_1 = [1 - (x / sum(nSamples)) for x in nSamples]
-    normedWeights = [x + 1e-5 for x in normedWeights_1]
+    normedWeights = [x + 1e-5 for x in normedWeights_1] # 避免除零錯誤
     balance_weights = torch.FloatTensor(normedWeights).to("cuda")
     return balance_weights
 
+# --------------------------------- 構建並初始化 3D SegFormer 模型 ---------------------------------
 def build_segformer3d_model(config=None):
+    """
+    根據配置字典動態構建並回傳 SegFormer3D 模型實例。
+
+    參數:
+        config (dict): 包含模型參數的配置字典，必須含有 'model_parameters' 鍵，該鍵對應子字典包含:
+            - in_channels (int): 輸入通道數
+            - sr_ratios (list[int]): 下採樣比率列表
+            - embed_dims (list[int]): Patch 嵌入維度列表
+            - patch_kernel_size (list[int]): Patch 卷積核大小列表
+            - patch_stride (list[int]): Patch 卷積步幅列表
+            - patch_padding (list[int]): Patch 卷積填充列表
+            - mlp_ratios (list[int]): MLP 隱藏維度倍增比例列表
+            - num_heads (list[int]): 注意力頭數列表
+            - depths (list[int]): Transformer 層深度列表
+            - decoder_head_embedding_dim (int): 解碼器頭 MLP 嵌入維度
+            - num_classes (int): 分割任務類別數
+            - decoder_dropout (float): 解碼器 Dropout 比例
+
+    回傳:
+        SegFormer3D: 根據參數初始化完成的 3D Segmentation Transformer 模型
+    """
     model = SegFormer3D(
         in_channels=config["model_parameters"]["in_channels"],
         sr_ratios=config["model_parameters"]["sr_ratios"],
@@ -145,9 +188,7 @@ def build_segformer3d_model(config=None):
         mlp_ratios=config["model_parameters"]["mlp_ratios"],
         num_heads=config["model_parameters"]["num_heads"],
         depths=config["model_parameters"]["depths"],
-        decoder_head_embedding_dim=config["model_parameters"][
-            "decoder_head_embedding_dim"
-        ],
+        decoder_head_embedding_dim=config["model_parameters"]["decoder_head_embedding_dim"],
         num_classes=config["model_parameters"]["num_classes"],
         decoder_dropout=config["model_parameters"]["decoder_dropout"],
     )
@@ -208,26 +249,37 @@ class SegFormer3D(nn.Module):
         # )
         self.apply(self._init_weights)
 
+    # 統一管理各種層的權重初始化規則
     def _init_weights(self, m):
+        """
+        為不同類型的層初始化權重：
+        - Linear, LayerNorm, BatchNorm2d/3d, Conv2d, Conv3d
+        """
+        # 線性層初始化：權重採用截斷正態分布 (std=0.02)，偏置置零
         if isinstance(m, nn.Linear):
             nn.init.trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
+        # LayerNorm 層初始化：偏置置零、權重置 1
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+        # 二維 BatchNorm 層初始化：偏置置零、權重置 1
         elif isinstance(m, nn.BatchNorm2d):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+        # 三維 BatchNorm 層初始化：偏置置零、權重置 1
         elif isinstance(m, nn.BatchNorm3d):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+        # 二維卷積層初始化：根據 fan_out 計算標準差，用正態分布初始化權重，偏置置零
         elif isinstance(m, nn.Conv2d):
             fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
             fan_out //= m.groups
             m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
             if m.bias is not None:
                 m.bias.data.zero_()
+        # 三維卷積層初始化：同樣根據 fan_out 計算標準差，用正態分布初始化權重，偏置置零
         elif isinstance(m, nn.Conv3d):
             fan_out = m.kernel_size[0] * m.kernel_size[1] * m.kernel_size[2] * m.out_channels
             fan_out //= m.groups
@@ -237,49 +289,90 @@ class SegFormer3D(nn.Module):
 
 
     def forward(self, x, embeds):
-        # embedding the input
+        """
+        前向傳播函數：
+        1. 將輸入的 3D 體積數據 x 和對應的 ESM 嵌入向量 embeds 一起送入 SegFormer3D 編碼器，提取多尺度特徵。
+        2. 從編碼器輸出列表中拆分出四個不同尺度的特徵圖 c1、c2、c3、c4。
+        3. 回傳這四個特徵圖供後續的解碼器使用。
+
+        參數：
+        x      (Tensor): 輸入的體積數據，形狀 (batch, channels, D, H, W)
+        embeds (Tensor): ESM 預訓練嵌入向量，形狀 (batch, embed_dim)
+
+        返回：
+        List[Tensor]: 包含四個尺度的特徵圖 [c1, c2, c3, c4]
+        """
+        # embedding the input # 通過 SegFormer3D 編碼器提取多尺度特徵
         x = self.segformer_encoder(x, embeds)
-        # # unpacking the embedded features generated by the transformer
+        # unpacking the embedded features generated by the transformer 分別拆分出四個不同尺度的特徵圖
         c1 = x[0]
         c2 = x[1]
         c3 = x[2]
         c4 = x[3]
-        # decoding the embedded features
+        # decoding the embedded features 回傳這四個特徵圖
         return [c1, c2, c3, c4]
         # return x
     
 # ----------------------------------------------------- encoder -----------------------------------------------------
+# 進行 (Patch) Embedding
 class PatchEmbedding(nn.Module):
+    """
+    3D Patch Embedding 模組：
+    將整個體積 (D×H×W) 切分為大小為 kernel_size^3 的 Patch，
+    並透過 3D 卷積投影到 embed_dim 維度，再做標準化。
+
+    參數：
+        in_channel  (int): 輸入體積的通道數，預設 1
+        embed_dim   (int): 每個 Patch 嵌入的維度，預設 768
+        kernel_size (int): Patch 卷積核大小，預設 7
+        stride      (int): Patch 卷積步幅，預設 4
+        padding     (int): Patch 卷積填充大小，預設 3
+    """
     def __init__(
         self,
         in_channel: int = 1,
         embed_dim: int = 768,
         kernel_size: int = 7,
         stride: int = 4,
-        padding: int = 3,
-    ):
+        padding: int = 3,):
         """
         in_channels: number of the channels in the input volume
         embed_dim: embedding dimmesion of the patch
         """
         super().__init__()
+        # 3D 卷積層：將輸入切分成 patch 並映射到 embed_dim 維空間
         self.patch_embeddings = nn.Conv3d(
             in_channel,
             embed_dim,
             kernel_size=kernel_size,
             stride=stride,
-            padding=padding,
-        )
+            padding=padding,)
+        # 對每個 patch 嵌入向量做 LayerNorm
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
+        """
+        前向傳播：
+          1. 輸入 x 經 3D 卷積後得到初步的 patch 特徵 (B, embed_dim, D', H', W')
+          2. 展平成 (B, embed_dim, N_patches)，再轉置為 (B, N_patches, embed_dim)
+          3. 對每個嵌入向量做 LayerNorm，輸出 (B, N_patches, embed_dim)
+
+        參數：
+          x (Tensor): 輸入的 3D 體積張量，形狀 (batch_size, in_channel, D, H, W)
+
+        返回：
+          patches (Tensor): Patch 嵌入結果，形狀 (batch_size, N_patches, embed_dim)
+        """
         # standard embedding patch
+        # 卷積切分並映射
         patches = self.patch_embeddings(x)
+        # 將空間維度展平並將通道維度移到最後
         patches = patches.flatten(2).transpose(1, 2)
+        # 標準化每個 patch 嵌入向量
         patches = self.norm(patches)
         return patches
 
-
+# 自注意力機制模塊
 class SelfAttention(nn.Module):
     def __init__(
         self,
@@ -370,7 +463,7 @@ class SelfAttention(nn.Module):
         out = self.proj_dropout(out)
         return out
 
-
+# 用於在 PatchEmbedding 的輸出特徵上，依序應用多頭自注意力 (SelfAttention)、MLP，以及 ESM 嵌入特徵的融合，完成深度特徵更新
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -420,7 +513,7 @@ class TransformerBlock(nn.Module):
         return x
             
 
-
+#  SegFormer3D 編碼器的核心：它以「金字塔」的方式，分四個階段（stage）對輸入 3D 體積做多尺度特徵提取。
 class MixVisionTransformer(nn.Module):
     def __init__(
         self,
@@ -598,7 +691,7 @@ class MixVisionTransformer(nn.Module):
     
         return out
 
-
+# Transformer Block 中的 MLP 分支
 class _MLP(nn.Module):
     def __init__(self, in_feature, mlp_ratio=2, dropout=0.2):
         super().__init__()
@@ -618,7 +711,7 @@ class _MLP(nn.Module):
         x = self.dropout(x)
         return x
 
-
+# 空間融合：在 MLP 的升降維流程中插入體積卷積，能加入鄰域的結構信息，讓模型不僅在通道維度上做變換，也能在 3D 空間上捕捉局部特徵。
 class DWConv(nn.Module):
     def __init__(self, dim=768):
         super().__init__()
@@ -640,12 +733,14 @@ class DWConv(nn.Module):
         return x
 
 ###################################################################################
+# 把輸入的 n（patch 數量）算出最接近的立方根整數，方便後面把展平後的序列 (B, N, C) 重塑回 (B, C, D, H, W)，其中 D=H=W=cube_root(N)
 def cube_root(n):
     return round(math.pow(n, (1 / 3)))
     
 
 ###################################################################################
 # ----------------------------------------------------- decoder -------------------
+# 用於 SegFormer 的解碼器頭，將不同解析度的 3D 特徵圖 flatten 為序列後，映射到 decoder 所需的統一嵌入維度，再標準化以便後續融合和上採樣
 class MLP_(nn.Module):
     """
     Linear Embedding
@@ -665,6 +760,7 @@ class MLP_(nn.Module):
 
 
 ###################################################################################
+# 把編碼器提取的多尺度特徵還原成最終的分割圖
 class SegFormerDecoderHead(nn.Module):
     """
     SegFormer: Simple and Efficient Design for Semantic Segmentation with Transformers
@@ -791,17 +887,20 @@ class SegFormerDecoderHead(nn.Module):
         return x, _c
 
 
-
+# 設定最後模型訓練架構
 class MultiTaskCryoModel(pl.LightningModule):
     def __init__(self,learning_rate=1e-5):
         super().__init__()
+        # 保存超參數，讓模型可以在訓練後進行回溯
         self.save_hyperparameters()
         self.model = SegFormer3D()
         self.segformer_decoder_atom = SegFormerDecoderHead(num_classes=4)
         self.segformer_decoder_amino = SegFormerDecoderHead(num_classes=21)
         self.custom_loss_fn = losses.dice.GeneralizedDiceFocalLoss(sigmoid=True,to_onehot_y=True)
+        # 定義交叉熵損失函數，將會用來計算訓練過程中的損失
         self.loss_fn = nn.CrossEntropyLoss()
 
+        # 克隆宏平均指標並用於訓練、驗證和測試
         self.metrics_macro_atom = MetricCollection([Accuracy(task='multiclass', num_classes=4, average='macro', mdmc_average="global"),
                                         Precision(task='multiclass', num_classes=4, average='macro', mdmc_average="global"),
                                         Recall(task='multiclass', num_classes=4, average='macro', mdmc_average="global"),
@@ -819,7 +918,8 @@ class MultiTaskCryoModel(pl.LightningModule):
 
         self.train_metrics_macro_amino = self.metrics_macro_amino.clone(prefix="train_macro_amino_")
         self.valid_metrics_macro_amino = self.metrics_macro_amino.clone(prefix="valid_macro_amino_")
-
+    
+    # 前向傳遞函數，將數據傳遞給模型並返回預測結果
     def forward(self, density_map_data, esm_embeds):
         y_hat = self.model(density_map_data, esm_embeds)
         y_hat_atom, tango = self.segformer_decoder_atom(y_hat[0], y_hat[1], y_hat[2], y_hat[3], charlie=None)
@@ -953,7 +1053,7 @@ class MultiTaskCryoModel(pl.LightningModule):
 
             total_loss = loss_atom + loss_amino
 
-            # === Log Metrics ===
+            # === Log Metrics === 
             self.log('loss_atom', loss_atom, on_step=True, on_epoch=True)
             self.log('loss_amino', loss_amino, on_step=True, on_epoch=True)
             self.log('total_loss', total_loss, on_step=True, on_epoch=True)
@@ -964,6 +1064,7 @@ class MultiTaskCryoModel(pl.LightningModule):
             # metric_log_macro_amino = self.valid_metrics_macro_amino(y_hat_amino_stage2, amino_labels.int())
             # self.log_dict(metric_log_macro_amino, on_step=True, on_epoch=True, sync_dist=True)
 
+    # 定義模型超參數 (預設學習率為1e-4)
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
@@ -971,12 +1072,13 @@ class MultiTaskCryoModel(pl.LightningModule):
         return parser
 
 def train_model():
-    pl.seed_everything(12)
+    pl.seed_everything(12) # 設置隨機種子，保證實驗可重複
     parser = ArgumentParser()
     parser = pl.Trainer.add_argparse_args(parser)
     parser = MultiTaskCryoModel.add_model_specific_args(parser)
 
     # training specific args
+    # 設定多GPU訓練參數
     parser.add_argument('--multi_gpu_backend', type=str, default=STRATEGY,
                         help="Backend to use for multi-GPU training")
     parser.add_argument('--advance_gpu_plugins', type=str, default=GPU_PLUGIN,
@@ -999,6 +1101,7 @@ def train_model():
                              "Enter True or num of batch you want to send, " "eg. 1 or 7")
     args = parser.parse_args()
 
+    # 設置訓練參數
     args.strategy = args.multi_gpu_backend
     args.devices = args.num_gpus
     args.num_nodes = args.nodes
@@ -1013,7 +1116,7 @@ def train_model():
     args.enable_model_summary = True
     args.weights_summary = "full"
 
-
+    # 創建數據集和數據加載器
     train_dataset = CryoData(DATASET_DIR, mode='train')
     valid_dataset = CryoData(DATASET_DIR, mode='valid')
 
@@ -1030,7 +1133,7 @@ def train_model():
     model = MultiTaskCryoModel()
     
 
-
+    # 計算模型的參數數量並顯示
     print("Model's trainable parameters: ", count_parameters(model))
 
     """
@@ -1059,9 +1162,10 @@ def train_model():
 
 
     """
-    
+    # 使用PyTorch Lightning的trainer來訓練模型
     trainer = pl.Trainer.from_argparse_args(args)
 
+    # 設定模型檢查點回調函數
     checkpoint_callback_atom = ModelCheckpoint(
         monitor='train_loss_atom', 
         save_top_k=10,
@@ -1082,15 +1186,19 @@ def train_model():
 
     trainer.callbacks = [checkpoint_callback_atom, checkpoint_callback_amino, lr_monitor]
 
+    # 使用Weights and Biases來記錄訓練過程
     logger = WandbLogger(project=args.project_name, entity=args.entity_name, offline=False)
     trainer.logger = logger
 
+    # 訓練模型
     trainer.fit(model, train_loader, valid_loader)
 
+    # 在測試集上進行測試
     trainer.test(test_loader, ckpt_path='best')
 
 
 ###################################################################################
+# 啟動訓練過程
 if __name__ == "__main__":
     train_model()
 ###################################################################################

@@ -1,61 +1,61 @@
-import torch
-import math
-import copy
-from torch import nn
-from functools import partial
-
-
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
-import torch.nn as nn
-from argparse import ArgumentParser
-from torch.utils.data import DataLoader
-from torch.utils.data import Dataset
-import os
-import numpy as np
-
-import mrcfile
-import json
-import sys
-
-from copy import deepcopy
-
-from pytorch_lightning.loggers import WandbLogger
-from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score, Dice
-
-
 """
 @author: nabin
 Combine atom and amino training together
 """
+import json
+import math
+from copy import deepcopy
+
+import mrcfile
+import os
+import numpy as np
+
+import torch
+import torch.nn as nn
+
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
+from argparse import ArgumentParser
+
+import sys
+import copy
+from functools import partial
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.loggers import WandbLogger
+from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score, Dice
 
 
+# 定義數據處理的參數
 box_size = 32  # Expected Dimensions to pass to Transformer Unet
 core_size = 20  # core of the image where we dnt have to worry about boundary issues
 
-BATCH_SIZE = 1  # for now
-DATALOADERS = 1
+BATCH_SIZE = 1  # for now # 當前批次大小
+DATALOADERS = 1  # 數據加載器的數量
 
-data_splits = list()
-idx_val_list_atom = list()
+data_splits = list() # 存儲數據集切分的列表
+# # 存儲最終的索引值列表
+idx_val_list_atom = list() 
 idx_val_list_amino = list()
+# 用於存儲預測的概率
 collect_pred_probs_atom= dict()
 collect_pred_probs_amino= dict()
 
 
-
+# 計算模型中需要訓練的參數數量
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-
+# 準備數據：從資料夾中獲取數據切分列表
 def prepare_data(dataset_dir, density_map_name):
     data_splits_old = [splits for splits in os.listdir(dataset_dir)]
     for arr in range(len(data_splits_old)):
+        # 根據密度圖名稱和切分索引來生成文件名稱
         data_splits.append(f"{density_map_name}_{arr}.npz")
 
 
 
-
+# 定義PyTorch的數據集類別
 class CryoData(Dataset):
     def __init__(self, root, transform=None, target_transform=None):
         self.root = root
@@ -63,17 +63,24 @@ class CryoData(Dataset):
         self.target_transform = target_transform
 
     def __len__(self):
+        # 返回數據集的大小
         return len(data_splits)
 
     def __getitem__(self, idx):
+        # 獲取對應的數據文件名
         cryodata = data_splits[idx].strip("\n")
+        # 加載數據
         loaded_data = np.load(f"{self.root}/{cryodata}")
-
+        # 提取蛋白質網格數據
         protein_manifest = loaded_data['protein_grid']
+        # 轉換為Tensor
         protein_torch = torch.from_numpy(protein_manifest).type(torch.FloatTensor)
+        ################### v2 新增的
+        # 從已載入的 npz 檔案中取出 ESM 序列嵌入（embeddings），並轉為 PyTorch Tensor
         protein_embeds_torch = torch.tensor(loaded_data['embeddings'])
-        return [protein_torch, protein_embeds_torch]
+        return [protein_torch, protein_embeds_torch] # 返回處理後的蛋白質數據
     
+# --------------------------------- 損失權重計算 ---------------------------------
 
 def calc_ce_weights_atom(batch):
     y_zeros = (batch == 0.).sum()
@@ -116,7 +123,8 @@ def calc_ce_weights_amino(batch):
     balance_weights = torch.FloatTensor(normedWeights).to("cuda")
     return balance_weights
 
-
+# --------------------------------- 構建並初始化 3D SegFormer 模型 ---------------------------------
+# 根據設定快速得到一個編碼器模型
 def build_segformer3d_model(config=None):
     model = SegFormer3D(
         in_channels=config["model_parameters"]["in_channels"],
@@ -138,6 +146,7 @@ def build_segformer3d_model(config=None):
 
 
 class SegFormer3D(nn.Module):
+    # 建立一個 MixVisionTransformer（就是多階段的 3D Patch→Transformer 編碼器）
     def __init__(
         self,
         in_channels: int = 1,
@@ -190,7 +199,8 @@ class SegFormer3D(nn.Module):
             # dropout=decoder_dropout,
         # )
         self.apply(self._init_weights)
-
+    
+    # 統一管理各種層的權重初始化規則
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             nn.init.trunc_normal_(m.weight, std=0.02)
@@ -232,6 +242,7 @@ class SegFormer3D(nn.Module):
         return [c1, c2, c3, c4]
     
 # ----------------------------------------------------- encoder -----------------------------------------------------
+# 進行 (Patch) Embedding
 class PatchEmbedding(nn.Module):
     def __init__(
         self,
@@ -262,7 +273,7 @@ class PatchEmbedding(nn.Module):
         patches = self.norm(patches)
         return patches
 
-
+# 自注意力機制模塊
 class SelfAttention(nn.Module):
     def __init__(
         self,
@@ -270,8 +281,8 @@ class SelfAttention(nn.Module):
         num_heads: int = 8,
         sr_ratio: int = 2,
         qkv_bias: bool = False,
-        attn_dropout: float = 0.0,
-        proj_dropout: float = 0.0,
+        attn_dropout: float = 0.0, # 注意力權重上的 dropout 比例
+        proj_dropout: float = 0.0, # 最後投影層的 dropout 比例
     ):
         """
         embed_dim : hidden size of the PatchEmbedded input
@@ -284,7 +295,7 @@ class SelfAttention(nn.Module):
         super().__init__()
         assert (
             embed_dim % num_heads == 0
-        ), "Embedding dim should be divisible by number of heads!"
+        ), "Embedding dim should be divisible by number of heads!" # "Embedding 維度必須能被 head 數整除！"
 
         self.num_heads = num_heads
         # embedding dimesion of each attention head
@@ -353,7 +364,13 @@ class SelfAttention(nn.Module):
         out = self.proj_dropout(out)
         return out
 
-
+# 用於在 PatchEmbedding 的輸出特徵上，依序應用多頭自注意力 (SelfAttention)、MLP，以及 ESM 嵌入特徵的融合，完成深度特徵更新
+"""
+- 結構流程：
+    1. LayerNorm -> SelfAttention -> 殘差連接
+    2. LayerNorm -> MLP       -> 殘差連接
+    3. 將 ESM embedding 投影後加入 -> 再次 Attention + MLP 殘差更新
+"""
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -362,8 +379,8 @@ class TransformerBlock(nn.Module):
         num_heads: int = 8,
         sr_ratio: int = 2,
         qkv_bias: bool = False,
-        attn_dropout: float = 0.2,
-        proj_dropout: float = 0.2,
+        attn_dropout: float = 0.2, # 注意力權重上的 dropout 比例
+        proj_dropout: float = 0.2, # 最後投影層的 dropout 比例
     ):
         """
         embed_dim : hidden size of the PatchEmbedded input
@@ -398,9 +415,8 @@ class TransformerBlock(nn.Module):
         x = x + self.mlp(self.norm2(x))
 
         return x
-            
 
-
+#  SegFormer3D 編碼器的核心：它以「金字塔」的方式，分四個階段（stage）對輸入 3D 體積做多尺度特徵提取。
 class MixVisionTransformer(nn.Module):
     def __init__(
         self,
@@ -527,7 +543,7 @@ class MixVisionTransformer(nn.Module):
         # (batch_size, num_patches, hidden_state) -> (batch_size, hidden_state, D, H, W)
 
         # stage 1
-        x = self.embed_1(x)
+        x = self.embed_1(x) 
 
         B, N, C = x.shape
         n = cube_root(N)
@@ -578,16 +594,16 @@ class MixVisionTransformer(nn.Module):
     
         return out
 
-
+# Transformer Block 中的 MLP 分支
 class _MLP(nn.Module):
     def __init__(self, in_feature, mlp_ratio=2, dropout=0.2):
         super().__init__()
-        out_feature = mlp_ratio * in_feature
-        self.fc1 = nn.Linear(in_feature, out_feature)
-        self.dwconv = DWConv(dim=out_feature)
-        self.fc2 = nn.Linear(out_feature, in_feature)
-        self.act_fn = nn.GELU()
-        self.dropout = nn.Dropout(dropout)
+        out_feature = mlp_ratio * in_feature # 隱藏層維度 = mlp_ratio * 輸入維度
+        self.fc1 = nn.Linear(in_feature, out_feature) # 第一層全連接：從 in_feature 升到 out_feature
+        self.dwconv = DWConv(dim=out_feature) # 插入深度可分離 3D 卷積，用來在序列之外添加空間信息融合
+        self.fc2 = nn.Linear(out_feature, in_feature) # 第二層全連接：從 out_feature 降回 in_feature
+        self.act_fn = nn.GELU() # GELU 激活函數（比 ReLU 更平滑）
+        self.dropout = nn.Dropout(dropout) # Dropout 用於隨機丟棄部分神經元，防止過擬合
 
     def forward(self, x):
         x = self.fc1(x)
@@ -598,7 +614,7 @@ class _MLP(nn.Module):
         x = self.dropout(x)
         return x
 
-
+# 空間融合：在 MLP 的升降維流程中插入體積卷積，能加入鄰域的結構信息，讓模型不僅在通道維度上做變換，也能在 3D 空間上捕捉局部特徵。
 class DWConv(nn.Module):
     def __init__(self, dim=768):
         super().__init__()
@@ -620,12 +636,14 @@ class DWConv(nn.Module):
         return x
 
 ###################################################################################
+# 把輸入的 n（patch 數量）算出最接近的立方根整數，方便後面把展平後的序列 (B, N, C) 重塑回 (B, C, D, H, W)，其中 D=H=W=cube_root(N)
 def cube_root(n):
     return round(math.pow(n, (1 / 3)))
     
 
 ###################################################################################
 # ----------------------------------------------------- decoder -------------------
+# 用於 SegFormer 的解碼器頭，將不同解析度的 3D 特徵圖 flatten 為序列後，映射到 decoder 所需的統一嵌入維度，再標準化以便後續融合和上採樣
 class MLP_(nn.Module):
     """
     Linear Embedding
@@ -645,6 +663,7 @@ class MLP_(nn.Module):
 
 
 ###################################################################################
+# 把編碼器提取的多尺度特徵還原成最終的分割圖
 class SegFormerDecoderHead(nn.Module):
     """
     SegFormer: Simple and Efficient Design for Semantic Segmentation with Transformers
@@ -770,7 +789,7 @@ class SegFormerDecoderHead(nn.Module):
         return x, _c
 
 
-
+# 設定最後模型訓練架構
 class MultiTaskCryoModel(pl.LightningModule):
     def __init__(self,learning_rate=1e-4, mode=None):
         super().__init__()
@@ -802,18 +821,19 @@ class MultiTaskCryoModel(pl.LightningModule):
     
         density_map_data, esm_embeds = batch[0], batch[1]
         esm_embeds = esm_embeds.float()
-        density_map_data = torch.unsqueeze(density_map_data, 1)
+        density_map_data = torch.unsqueeze(density_map_data, 1) # 增加額外的維度，符合模型輸入要求
 
         y_hat_pred = self(density_map_data, esm_embeds)
 
-        probs = torch.softmax(y_hat_pred[0], dim=0)
+        probs = torch.softmax(y_hat_pred[0], dim=0) # 計算softmax概率
         
-        probs_permute = torch.permute(probs, (1, 2, 3, 0))
+        probs_permute = torch.permute(probs, (1, 2, 3, 0)) # 重排概率值
  
-        vals = torch.argmax(y_hat_pred[0], dim=0)
+        vals = torch.argmax(y_hat_pred[0], dim=0) # 取最大概率的索引
         
+        # 儲存胺基酸和原子的預測結果
         if self.mode == 'atom':
-            idx_val_np_atom = np.empty(shape=(32, 32, 32), dtype='S30')
+            idx_val_np_atom = np.empty(shape=(32, 32, 32), dtype='S30') # 用來存儲最終的預測值
 
             for i in range(len(probs_permute)):
                 for j in range(len(probs_permute[i])):
@@ -836,7 +856,7 @@ class MultiTaskCryoModel(pl.LightningModule):
                         idx_val_np_amino[i][j][k] = v
             idx_val_list_amino.append(idx_val_np_amino)
         
-        return vals
+        return vals # 返回最大概率的預測值
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -847,74 +867,76 @@ class MultiTaskCryoModel(pl.LightningModule):
 
 
 def infer_classifier(density_map_splits_dir, input_data_dir, density_map_name, amino_checkpoint, atom_checkpoint, infer_run_on, infer_on_gpu):
-    pl.seed_everything(42)
+    pl.seed_everything(42) # 設置隨機種子，確保實驗可重現
     parser = ArgumentParser()
     parser = pl.Trainer.add_argparse_args(parser)
     parser = MultiTaskCryoModel.add_model_specific_args(parser)
 
     prepare_data(dataset_dir=density_map_splits_dir, density_map_name=density_map_name)
-    dataset = CryoData(density_map_splits_dir)
+    dataset = CryoData(density_map_splits_dir) # 加載數據
     test_loader = DataLoader(dataset=dataset, batch_size=BATCH_SIZE, shuffle=False, pin_memory=False,
-                             num_workers=1)
+                             num_workers=1) # 創建數據加載器
 
     args, unknown = parser.parse_known_args()
-    args.detect_anomaly=True
-    args.enable_model_summary = True
-    if infer_run_on == "gpu":
+    args.detect_anomaly=True # 啟用異常檢測
+    args.enable_model_summary = True # 啟用模型摘要
+    if infer_run_on == "gpu": 
         args.accelerator = "gpu"
-        args.devices = [infer_on_gpu]
+        args.devices = [infer_on_gpu] # 設置使用的GPU設備
     else:
-        args.accelerator = "cpu"
+        args.accelerator = "cpu" # 使用CPU運行
 
+    # 創建模型、訓練器和預測結果
+    # Load the amino acid model and run inference
     atom_model = MultiTaskCryoModel.load_from_checkpoint(atom_checkpoint, mode='atom')
     trainer = pl.Trainer.from_argparse_args(args)
     atom_predictions = trainer.predict(atom_model, dataloaders=test_loader)
 
-    # Load the amino acid model and run inference
     amino_model = MultiTaskCryoModel.load_from_checkpoint(amino_checkpoint,  mode='amino')
     amino_predictions = trainer.predict(amino_model, dataloaders=test_loader)
     trainer = pl.Trainer.from_argparse_args(args)
 
-    
+    # 轉換為numpy數組
     for pred in range(len(atom_predictions)):
         atom_predictions[pred] = atom_predictions[pred].numpy()
         
     for pred in range(len(amino_predictions)):
         amino_predictions[pred] = amino_predictions[pred].numpy()
 
-
+    # 讀取mrc檔案
     org_map = f"{input_data_dir}/{density_map_name}/emd_normalized_map.mrc"
     org_map = mrcfile.open(org_map, mode='r')
 
+    # atom
     recon, idx_val_mat = reconstruct_map(manifest=atom_predictions, idx_val_np=idx_val_list_atom, image_shape=org_map.data.shape)
-    filename = "atom_predicted.mrc"
+    filename = "atom_predicted.mrc" # 預測結果保存的檔案名
     outfilename = f"{input_data_dir}/{density_map_name}/{density_map_name}_{filename}"
     with mrcfile.new(outfilename, overwrite=True) as mrc:
-        mrc.set_data(recon)
+        mrc.set_data(recon) # 保存預測結果到mrc檔案
         mrc.voxel_size = 1
         mrc.header.origin = org_map.header.origin
         mrc.close()
 
-    # save the probabilities
+    # save the probabilities # 保存預測概率
     file_prob = f"{input_data_dir}/{density_map_name}/{density_map_name}_probabilities_atom.txt"
     save_probs(outfilename, idx_val_mat, file_prob, mode='atom')
 
-
-    recon, idx_val_mat = reconstruct_map(manifest=amino_predictions, idx_val_np=idx_val_list_amino, image_shape=org_map.data.shape)
-    filename = "amino_predicted.mrc"
+    # amino
+    recon, idx_val_mat = reconstruct_map(manifest=amino_predictions, idx_val_np=idx_val_list_amino, image_shape=org_map.data.shape) # 重建圖像
+    filename = "amino_predicted.mrc" # 預測結果保存的檔案名
     outfilename = f"{input_data_dir}/{density_map_name}/{density_map_name}_{filename}"
     with mrcfile.new(outfilename, overwrite=True) as mrc:
-        mrc.set_data(recon)
+        mrc.set_data(recon) # 保存預測結果到mrc檔案
         mrc.voxel_size = 1
         mrc.header.origin = org_map.header.origin
         mrc.close()
 
-    # save the probabilities
+    # save the probabilities # 保存預測概率
     file_prob = f"{input_data_dir}/{density_map_name}/{density_map_name}_probabilities_amino.txt"
     save_probs(outfilename, idx_val_mat, file_prob, mode='amino')
 
 
-
+# 根據Transformer Unet的輸出重建完整的蛋白質圖像
 def reconstruct_map(manifest, idx_val_np, image_shape):
     # takes the output of model and constructs the full dimension of the protein
     extract_start = int((box_size - core_size) / 2)
@@ -946,7 +968,7 @@ def reconstruct_map(manifest, idx_val_np, image_shape):
     return float_reconstruct_image, idx_val_np_mat
 
 
-
+# 計算manifest的維度，這樣可以確保重建時不會超出邊界
 def get_manifest_dimensions(image_shape):
     dimensions = [0, 0, 0]
     dimensions[0] = math.ceil(image_shape[0] / core_size) * core_size
@@ -958,7 +980,7 @@ def get_manifest_dimensions(image_shape):
 def get_xyz(idx, voxel, origin):
     return (idx * voxel) + origin
 
-
+# 保存預測概率到文件中
 def save_probs(mrc_file, idx_file, file_prob, mode):
     if mode == 'atom':
 
