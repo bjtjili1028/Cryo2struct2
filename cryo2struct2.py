@@ -13,12 +13,17 @@ Cryo2Struct-V2 主脚本：
 """
 
 import time  # 用於計算執行時間
+from datetime import date  # 用於處理日期
 import argparse # 用於處理命令行參數 
 import yaml # 用於讀取yml格式的配置文件 
 import os # 用於處理檔案和目錄 
 import shutil # 用於刪除目錄和文件 
 import threading # 用於創建和管理線程
 import mrcfile
+
+import torch
+from pprint import pprint
+
 
 # 从 utils 包中导入各子模块
 from utils import get_probs_cords_from_atom_amino, clustering_centroid, grid_division, get_ca_from_pred_probs, clustering_centroid_for_c_n
@@ -74,8 +79,7 @@ def delete_directory(directory_path):
     用于在后台清理临时文件夹
     """
     shutil.rmtree(directory_path)
-           
-    
+
 def make_predictions(config_dict):
     """
     核心流程：
@@ -95,7 +99,7 @@ def make_predictions(config_dict):
     
     # 原始脚本路径（硬编码，应改为相对路径）
     # script_name = ['/bml/nabin/charlieCryo/src/cryo2struct_v2/Cryo2Struct_V2_final/infer/atom_amino_joint_inference.py']
-    script_name = ['/media/ray-suen/TRANSCEND1/huei/Cryo2struct2/infer/atom_amino_joint_inference.py']
+    script_name = ['/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/infer/atom_amino_joint_inference.py']
      # 对应 checkpoint 字典键
     checkpoint_name = ['amino_checkpoint', 'atom_checkpoint']
 
@@ -230,13 +234,14 @@ def main():
     # 打印配置信息
     for key,value in config_dict.items():
         print("%s : %s"%(key, value))
+    print("Date:",date.today())
     print("\n- This might take a bit. Time for a coffee break, maybe! -")
     
     # 進行預測
     make_predictions(config_dict)
     
     ############ v2 新增
-    # print("Extracting CA") # 得到原始ca的pdb和mac檔案
+    # print("\nExtracting CA") # 得到原始ca的pdb和mac檔案
     extract_ca_from_prediction_probabilities(config_dict)
     ############
     
