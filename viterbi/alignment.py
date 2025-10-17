@@ -131,49 +131,101 @@ def load_data(trans_file, hmm_file, save_ca_probs, trans_file_c, trans_file_n):
 
 ######################## 進行原子之間的座標配對
 
-def match_atoms(transition_dic, transition_dic_n, transition_dic_c,max_dist_n_ca,max_dist_ca_c):
-    """
-    最近鄰配對：根據典型鍵長閾值，將 CA 原子與最近的 N、C 原子配對。
-    參數：
-      transition_dic     CA 坐標字典 {idx: "x y z", …}
-      transition_dic_n   N  原子坐標字典
-      transition_dic_c   C  原子坐標字典
-      max_dist_n_ca      N–CA 最大允許距離
-      max_dist_ca_c      CA–C 最大允許距離
-    回傳：
-      matching 字典，格式 {ca_index: (n_index, c_index), …}
-    """
-    # max_dist_n_ca=config_dict['CA_N_DIST']
-    # max_dist_ca_c=config_dict['CA_C_DIST']
+# def match_atoms(transition_dic, transition_dic_n, transition_dic_c,max_dist_n_ca,max_dist_ca_c):
+#     """
+#     最近鄰配對：根據典型鍵長閾值，將 CA 原子與最近的 N、C 原子配對。
+#     參數：
+#       transition_dic     CA 坐標字典 {idx: "x y z", …}
+#       transition_dic_n   N  原子坐標字典
+#       transition_dic_c   C  原子坐標字典
+#       max_dist_n_ca      N–CA 最大允許距離
+#       max_dist_ca_c      CA–C 最大允許距離
+#     回傳：
+#       matching 字典，格式 {ca_index: (n_index, c_index), …}
+#     """
+#     # max_dist_n_ca=config_dict['CA_N_DIST']
+#     # max_dist_ca_c=config_dict['CA_C_DIST']
     
-    # 1. 將三個字典轉成 Nx3 的座標陣列，方便計算距離
-    def to_array(dic):
-        arr = []
-        for i in sorted(dic.keys()):
-            xyz = [float(x) for x in dic[i].split() if x!='']  # 分割字串並轉型
-            arr.append(xyz)
-        return np.array(arr)
+#     # 1. 將三個字典轉成 Nx3 的座標陣列，方便計算距離
+#     def to_array(dic):
+#         arr = []
+#         for i in sorted(dic.keys()):
+#             xyz = [float(x) for x in dic[i].split() if x!='']  # 分割字串並轉型
+#             arr.append(xyz)
+#         return np.array(arr)
 
-    coords_ca = to_array(transition_dic)   # α-碳 (CA) 的座標
-    coords_n  = to_array(transition_dic_n) # 胺氮 (N) 的座標
-    coords_c  = to_array(transition_dic_c) # 羰基碳 (C) 的座標
+#     coords_ca = to_array(transition_dic)   # α-碳 (CA) 的座標
+#     coords_n  = to_array(transition_dic_n) # 胺氮 (N) 的座標
+#     coords_c  = to_array(transition_dic_c) # 羰基碳 (C) 的座標
 
-    # 2. 定義找最近鄰函式：若最小距離小於閾值，回傳索引，否則回 None
-    def find_nn(src, targets, max_dist):
-        dists = np.linalg.norm(targets - src, axis=1) # 計算 src 到所有 target 點的歐氏距離，結果是一個長度為 N 的向量
-        idx   = np.argmin(dists) # 找出距離最小的那個索引（argmin 回傳最小值的位置）
-        return idx if dists[idx] <= max_dist else None # 如果最小距離小於等於 max_dist，就回傳索引；否則回傳 None
+#     # 2. 定義找最近鄰函式：若最小距離小於閾值，回傳索引，否則回 None
+#     def find_nn(src, targets, max_dist):
+#         dists = np.linalg.norm(targets - src, axis=1) # 計算 src 到所有 target 點的歐氏距離，結果是一個長度為 N 的向量
+#         idx   = np.argmin(dists) # 找出距離最小的那個索引（argmin 回傳最小值的位置）
+#         return idx if dists[idx] <= max_dist else None # 如果最小距離小於等於 max_dist，就回傳索引；否則回傳 None
 
-    # 3. 針對每個 CA，分別找距離最近的 N 和 C
+#     # 3. 針對每個 CA，分別找距離最近的 N 和 C
+#     matching = {}
+#     for i_ca, ca in enumerate(coords_ca):
+#         i_n = find_nn(ca, coords_n,  max_dist_n_ca)
+#         i_c = find_nn(ca, coords_c,  max_dist_ca_c)
+#         if i_n is not None and i_c is not None:
+#             matching[i_ca] = (i_n, i_c)  # 同時找到合理鄰居
+#     return matching
+
+# 放在 alignment.py，覆蓋原本的 match_atoms（可一起貼上三個小工具函式）
+
+def _to_xyz_array_from_dict(dic):
+    import numpy as np
+    if not dic:
+        return np.empty((0, 3), dtype=float)
+    rows = []
+    for i in sorted(dic.keys()):
+        parts = [p for p in dic[i].split() if p != ""]
+        if len(parts) < 3:
+            continue  # 略過壞行
+        rows.append([float(parts[0]), float(parts[1]), float(parts[2])])
+    arr = np.asarray(rows, dtype=float)
+    if arr.size == 0:
+        return np.empty((0, 3), dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError(f"Expected (N,3), got {arr.shape}")
+    return arr
+
+def _find_nn_safe(src_xyz, targets_xyz, max_dist):
+    import numpy as np
+    targets = np.asarray(targets_xyz, dtype=float)
+    if targets.size == 0:
+        return None
+    src = np.asarray(src_xyz, dtype=float).reshape(1, 3)
+    dists = np.linalg.norm(targets - src, axis=1)
+    i = int(np.argmin(dists))
+    return i if dists[i] <= max_dist else None
+
+def match_atoms(transition_dic, transition_dic_n, transition_dic_c,
+                max_dist_n_ca, max_dist_ca_c):
+    """
+    將 CA 與最近的 N、C 配對；若 N 或 C 不存在，對應索引為 None。
+    """
+    import numpy as np
+    coords_ca = _to_xyz_array_from_dict(transition_dic)
+    coords_n  = _to_xyz_array_from_dict(transition_dic_n)
+    coords_c  = _to_xyz_array_from_dict(transition_dic_c)
+
+    print(f"[DEBUG] coords: CA={coords_ca.shape}, N={coords_n.shape}, C={coords_c.shape}")
+    if coords_c.shape[0] == 0:
+        print("[WARN] C coords is empty; will output CA/N only (no C).")
+    if coords_n.shape[0] == 0:
+        print("[WARN] N coords is empty; will output CA/C only (no N).")
+
     matching = {}
     for i_ca, ca in enumerate(coords_ca):
-        i_n = find_nn(ca, coords_n,  max_dist_n_ca)
-        i_c = find_nn(ca, coords_c,  max_dist_ca_c)
-        if i_n is not None and i_c is not None:
-            matching[i_ca] = (i_n, i_c)  # 同時找到合理鄰居
+        i_n = _find_nn_safe(ca, coords_n, max_dist_n_ca) if coords_n.shape[0] > 0 else None
+        i_c = _find_nn_safe(ca, coords_c, max_dist_ca_c) if coords_c.shape[0] > 0 else None
+        # 無論有沒有配到，都記下（None 代表缺）
+        matching[i_ca] = (i_n, i_c)
     return matching
-
-
+#############################################################################
 def save(save_filename, matching, neighbor_mode="ALL"):
     """
     修改說明：
@@ -209,10 +261,16 @@ def save(save_filename, matching, neighbor_mode="ALL"):
             x_ca = y_ca = z_ca = 0.0
 
         # 先拿到 raw_n_list, raw_c_list（可能為空 list）
-        raw_n_list, raw_c_list = matching.get(ca_index, ([], []))
-        # 型別檢查：如果不是 list/tuple，就包成 list
-        n_list = raw_n_list if isinstance(raw_n_list, (list,tuple)) else [raw_n_list] if raw_n_list is not None else []
-        c_list = raw_c_list if isinstance(raw_c_list, (list,tuple)) else [raw_c_list] if raw_c_list is not None else []
+        # raw_n_list, raw_c_list = matching.get(ca_index, ([], []))
+        # # 型別檢查：如果不是 list/tuple，就包成 list
+        # n_list = raw_n_list if isinstance(raw_n_list, (list,tuple)) else [raw_n_list] if raw_n_list is not None else []
+        # c_list = raw_c_list if isinstance(raw_c_list, (list,tuple)) else [raw_c_list] if raw_c_list is not None else []
+
+        
+        # 新的（預設 None，缺就跳過）
+        raw_n, raw_c = matching.get(ca_index, (None, None))
+        n_list = [] if raw_n is None else (raw_n if isinstance(raw_n, (list, tuple)) else [raw_n])
+        c_list = [] if raw_c is None else (raw_c if isinstance(raw_c, (list, tuple)) else [raw_c])
 
         # 如果只要最近 1 個，就切到只有第一個
         if neighbor_mode == 1:
@@ -609,13 +667,13 @@ def run_vitebi(key_idx, chain_observations, transition_matrix, emission_matrix, 
         print(f"Cryo2Struct2 Alignment: Run time {runtime_seconds:.2f} seconds ({runtime_minutes:.2f} minutes)")
 
         ######## clean up:  清理掉過程文件 這部分應該註解要 才可以輸出他的資料
-        map_directory_path = f"{config_dict['input_data_dir']}/{config_dict['density_map_name']}"
+        # map_directory_path = f"{config_dict['input_data_dir']}/{config_dict['density_map_name']}"
         
-        if os.path.exists(f"{map_directory_path}/{config_dict['density_map_name']}_amino_predicted.mrc"):
-            os.remove(f"{map_directory_path}/{config_dict['density_map_name']}_amino_predicted.mrc")
+        # if os.path.exists(f"{map_directory_path}/{config_dict['density_map_name']}_amino_predicted.mrc"):
+        #     os.remove(f"{map_directory_path}/{config_dict['density_map_name']}_amino_predicted.mrc")
         
-        if os.path.exists(f"{map_directory_path}/{config_dict['density_map_name']}_atom_predicted.mrc"):
-            os.remove(f"{map_directory_path}/{config_dict['density_map_name']}_atom_predicted.mrc")
+        # if os.path.exists(f"{map_directory_path}/{config_dict['density_map_name']}_atom_predicted.mrc"):
+        #     os.remove(f"{map_directory_path}/{config_dict['density_map_name']}_atom_predicted.mrc")
         
         # files_to_delete = glob.glob(os.path.join(map_directory_path, f"*.txt"))
         # for f in files_to_delete:
