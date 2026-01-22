@@ -188,9 +188,10 @@ def extract_coords(label_data, header_info, atom_type):
 
 if __name__ == "__main__":
     # 1) 參數
-    map_num = "26919"
+    map_num = "27094"
     mrc_path = rf"/media/ray-suen/TRANSCEND1/huei/org_map_fasta/{map_num}/atom_emd_normalized_map.mrc"
-    pred_map = rf"/media/ray-suen/TRANSCEND1/huei/pre_cluster_map/v1_split_max_cluster_3/labeled_{map_num}.mrc"
+    # pred_map = rf"/media/ray-suen/TRANSCEND1/huei/pre_cluster_map/v1_split_max_cluster_3/labeled_{map_num}.mrc"
+    pred_map = rf"/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/labeled_27094.mrc"
     atom_type = "all"    # 'CA', 'C', 'N' or 'all'
     print(pred_map,"\n")
 

@@ -1,12 +1,13 @@
 density_map_name: '27094'
-input_data_dir: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/input' # provide absolute path of input directory
-amino_checkpoint: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models/amino_acid_type.ckpt' # provide absolute path of amino acid checkpoint
+input_data_dir: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/all_output/change_e_new_parms_true_fasta_output/input' # provide absolute path of input directory
+# amino_checkpoint: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models/amino_acid_type.ckpt' # provide absolute path of amino acid checkpoint
+amino_checkpoint: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models/amino_acid_type.ckpt'
 atom_checkpoint: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models/atom_type.ckpt' # provide absolute path of atom checkpoint
 confidence_score_models: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models' # provide absolute path of models directory
 infer_run_on: 'gpu' # options- cpu or gpu
 infer_on_gpu: 0
 threshold: 0.4 # threshold for picking carbon alpha atoms
-clustering_threshold: 3 # clustering proximity
+clustering_threshold: 2 # clustering proximity
 use_sequence: 'full' # options- full or atomic_chain
 std_lambda: 10
 reverse_seq: False # 設定胺基酸序列的輸出要倒序還是正序(正序為F 反序為N)
@@ -14,3 +15,40 @@ reverse_seq: False # 設定胺基酸序列的輸出要倒序還是正序(正序�
 split_mod: 2 # 1是取最大機率值  2是取0.4當作標準
 CA_C_DIST: 2  # C–CA 最大允許距離
 CA_N_DIST: 2  # N–CA 最大允許距離
+
+# # new parms
+# coverage_factor : 1.4
+# ca_mult : 0.8
+# n_mult : 0.8
+# c_mult : 0.8
+
+# nms_radius : 1.5
+
+bond_matching:
+  # ---- 半徑 ----
+  r_ca_c_max: 5.0
+  r_ca_n_max: 5.0
+  r_ca_c_low: 1.0
+  r_ca_n_low: 1.0
+
+  # ---- 角度條件 ----
+  use_angle: false
+  angle_target: 110.0
+  angle_tol: 25.0
+  w_angle: 0.7
+
+  # ---- 鍵長視窗 ----
+  bondlen_window: false
+  ca_c_len_lo: 1.3
+  ca_c_len_hi: 1.9
+  ca_n_len_lo: 1.2
+  ca_n_len_hi: 1.8
+
+  # ---- 距離成本 ----
+  distance_power: 1.4
+  w_dist_c: 1.1
+  w_dist_n: 1.0
+
+  # ---- 匹配策略 ----
+  exclusive_match: true
+  select_priority: "prob_then_distance"

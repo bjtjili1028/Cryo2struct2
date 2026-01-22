@@ -18,6 +18,8 @@ import glob
 import re
 
 from utils import extract_seq_from_pdb # 引入提取PDB序列的工具
+from utils import bond_matching
+from utils.bond_matching import Params
 from postprocess import generate_confidence_scores, generate_confidence_score_plots # 引入信心分數和信心圖生成工具
 from Bio.PDB import PDBParser
 from scipy.spatial import cKDTree
@@ -562,7 +564,7 @@ def run_vitebi(key_idx, chain_observations, transition_matrix, emission_matrix, 
     # Load the C++ shared library
     viterbi_algo_path = os.path.abspath(config_dict['input_data_dir'])
     viterbi_algo_path = os.path.dirname(viterbi_algo_path)
-    lib = ctypes.cdll.LoadLibrary(f'{viterbi_algo_path}/viterbi/viterbi.so')
+    lib = ctypes.cdll.LoadLibrary(f'{viterbi_algo_path}/../../viterbi/viterbi.so')
 
     # Define the C++ wrapper function
     wrapper_function = lib.viterbi_main
@@ -650,8 +652,20 @@ def run_vitebi(key_idx, chain_observations, transition_matrix, emission_matrix, 
         load_data(trans_file=cord_file_ca, hmm_file=hmm_out_save_file, save_ca_probs = save_ca_probs, trans_file_c=cord_file_c, trans_file_n=cord_file_n)
                 
         # 2. 建立所有合理鄰居配對
-        matching = match_atoms(transition_dic,transition_dic_n,transition_dic_c,max_dist_n_ca=config_dict['CA_N_DIST'],max_dist_ca_c=config_dict['CA_C_DIST'])
+        ## 簡陋版距離匹配
+        # print(f"\n old_bond_match\n " )
+        # matching = match_atoms(transition_dic,transition_dic_n,transition_dic_c,max_dist_n_ca=config_dict['CA_N_DIST'],max_dist_ca_c=config_dict['CA_C_DIST'])
+        
+        ## 成本版距離匹配
+        print(f"\n new_bond_match\n " )
+        bm_cfg = config_dict['bond_matching']
+    
+        if isinstance(bm_cfg, dict):
+            # 從 YAML 來的是 dict，把它變成 Params dataclass
+            bm_p = Params(**bm_cfg)
 
+        matching = bond_matching.bond_match(transition_dic,transition_dic_n,transition_dic_c, bm_p,return_matching=True)
+        
         # 3a. 輸出所有鄰居
         # save(save_filename=save_pdb_file, matching=matching, neighbor_mode="ALL")
 
@@ -667,17 +681,17 @@ def run_vitebi(key_idx, chain_observations, transition_matrix, emission_matrix, 
         print(f"Cryo2Struct2 Alignment: Run time {runtime_seconds:.2f} seconds ({runtime_minutes:.2f} minutes)")
 
         ######## clean up:  清理掉過程文件 這部分應該註解要 才可以輸出他的資料
-        # map_directory_path = f"{config_dict['input_data_dir']}/{config_dict['density_map_name']}"
+        map_directory_path = f"{config_dict['input_data_dir']}/{config_dict['density_map_name']}"
         
-        # if os.path.exists(f"{map_directory_path}/{config_dict['density_map_name']}_amino_predicted.mrc"):
-        #     os.remove(f"{map_directory_path}/{config_dict['density_map_name']}_amino_predicted.mrc")
+        if os.path.exists(f"{map_directory_path}/{config_dict['density_map_name']}_amino_predicted.mrc"):
+            os.remove(f"{map_directory_path}/{config_dict['density_map_name']}_amino_predicted.mrc")
         
-        # if os.path.exists(f"{map_directory_path}/{config_dict['density_map_name']}_atom_predicted.mrc"):
-        #     os.remove(f"{map_directory_path}/{config_dict['density_map_name']}_atom_predicted.mrc")
+        if os.path.exists(f"{map_directory_path}/{config_dict['density_map_name']}_atom_predicted.mrc"):
+            os.remove(f"{map_directory_path}/{config_dict['density_map_name']}_atom_predicted.mrc")
         
-        # files_to_delete = glob.glob(os.path.join(map_directory_path, f"*.txt"))
-        # for f in files_to_delete:
-            # os.remove(f)
+        files_to_delete = glob.glob(os.path.join(map_directory_path, f"*.txt"))
+        for f in files_to_delete:
+            os.remove(f)
         
         print("Cryo2Struct2: Finished!\n")
         ami_list = list()
@@ -794,6 +808,13 @@ def main(coordinate_file, emission_file, config_dict, save_ca_probs):
     length_coordinate_list = len(coordinate_list)
     coordinate_distance_matrix = np.zeros((length_coordinate_list, length_coordinate_list), dtype=np.double)
     
+    # # 1. 取得長度 (LEN)
+    length_coordinate_list = len(coordinate_list)
+    print(f"--- 基本資訊 ---")
+    print(f"Alpha 碳原子數量 (LEN): {length_coordinate_list}")
+    print(f"計算總次數 (LEN x LEN): {length_coordinate_list * length_coordinate_list}")
+    print("-" * 30)
+
     # compute distance between each carbon alpha to other and put into distance matrix
     for carbon_alpha in range(length_coordinate_list):
         for carbon_alpha_next in range(length_coordinate_list):
