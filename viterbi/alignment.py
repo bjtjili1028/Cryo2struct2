@@ -564,7 +564,7 @@ def run_vitebi(key_idx, chain_observations, transition_matrix, emission_matrix, 
     # Load the C++ shared library
     viterbi_algo_path = os.path.abspath(config_dict['input_data_dir'])
     viterbi_algo_path = os.path.dirname(viterbi_algo_path)
-    lib = ctypes.cdll.LoadLibrary(f'{viterbi_algo_path}/../../viterbi/viterbi.so')
+    lib = ctypes.cdll.LoadLibrary(f'{viterbi_algo_path}/viterbi/viterbi.so')
 
     # Define the C++ wrapper function
     wrapper_function = lib.viterbi_main
@@ -874,8 +874,9 @@ def main(coordinate_file, emission_file, config_dict, save_ca_probs):
             seq_key_list.append(seq_key)
             chains_sequence_dict[seq_key] = seq_lines[seq_contents + 1].strip('\n')
     for ke, va in chains_sequence_dict.items():
+        clean_ke = ke[0]
         length_va = len(va)
-        chain_list.extend(ke*length_va)
+        chain_list.extend(clean_ke*length_va)
 
 
     FASTA_end_time = time.time()

@@ -98,7 +98,6 @@ def make_predictions(config_dict):
     density_map_split_dir = os.path.join(density_map_dir, f"{config_dict['density_map_name']}_splits")
     
     # 原始脚本路径（硬编码，应改为相对路径）
-    # script_name = ['/bml/nabin/charlieCryo/src/cryo2struct_v2/Cryo2Struct_V2_final/infer/atom_amino_joint_inference.py']
     script_name = ['/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/infer/atom_amino_joint_inference.py']
      # 对应 checkpoint 字典键
     checkpoint_name = ['amino_checkpoint', 'atom_checkpoint']
@@ -167,47 +166,47 @@ def extract_probs_cords_from_atom_amino(config_dict):
         os.remove(probability_file_amino_common_emi)
     ##################################################################################
     ############# 分割三種骨幹原子 #####################
-    get_probs_cords_from_atom_amino.split_atom_file(
-                    probability_file_atom=probability_file_atom, 
-                    split_output_ca = split_output_ca, 
-                    split_output_n = split_output_n, 
-                    split_output_c = split_output_c,
-                    ca_threshold = config_dict['threshold'],
-                    mode=config_dict['split_mod'] # mod=1是取最大機率值  mod=2是取0.4當作標準 
-                    ) 
+    # get_probs_cords_from_atom_amino.split_atom_file(
+    #                 probability_file_atom=probability_file_atom, 
+    #                 split_output_ca = split_output_ca, 
+    #                 split_output_n = split_output_n, 
+    #                 split_output_c = split_output_c,
+    #                 ca_threshold = config_dict['threshold'],
+    #                 mode=config_dict['split_mod'] # mod=1是取最大機率值  mod=2是取0.4當作標準 
+    #                 ) 
     ############# new_atom_pick ########################################################
-    # # cal base_target
-    # fasta_file = [f for f in os.listdir(f"{config_dict['input_data_dir']}/{config_dict['density_map_name']}") if f.endswith(".fasta")]
-    # fasta_file.sort()
-    # base_target = atom_pick.determine_target_count(fasta_file[0])
-    # target_coverage = int(base_target * config_dict['coverage_factor'])
-    # print(f"\n[GRID] cf={config_dict['coverage_factor']:.2f} → target_atoms={target_coverage}")
+    # cal base_target
+    fasta_file = [f for f in os.listdir(f"{config_dict['input_data_dir']}/{config_dict['density_map_name']}") if f.endswith(".fasta")]
+    fasta_file.sort()
+    base_target = atom_pick.determine_target_count(fasta_file[0])
+    target_coverage = int(base_target * config_dict['coverage_factor'])
+    print(f"\n[GRID] cf={config_dict['coverage_factor']:.2f} → target_atoms={target_coverage}")
 
-    # # 基於自適應閾值，乘上倍率
-    # ca_t, n_t, c_t = atom_pick.adaptive_threshold_analysis(probability_file_atom, target_coverage)
-    # def clamp01(x): return max(0.0, min(1.0, float(x)))
+    # 基於自適應閾值，乘上倍率
+    ca_t, n_t, c_t = atom_pick.adaptive_threshold_analysis(probability_file_atom, target_coverage)
+    def clamp01(x): return max(0.0, min(1.0, float(x)))
     
-    # ca_t = clamp01(ca_t * config_dict['ca_mult'])
-    # n_t  = clamp01(n_t  * config_dict['n_mult'])
-    # c_t  = clamp01(c_t  * config_dict['c_mult'])
+    ca_t = clamp01(ca_t * config_dict['ca_mult'])
+    n_t  = clamp01(n_t  * config_dict['n_mult'])
+    c_t  = clamp01(c_t  * config_dict['c_mult'])
 
-    # print(f"[GRID] thresholds  CA={ca_t:.4f} (x{config_dict['ca_mult']}), N={n_t:.4f} (x{config_dict['n_mult']}), C={c_t:.4f} (x{config_dict['c_mult']})")
+    print(f"[GRID] thresholds  CA={ca_t:.4f} (x{config_dict['ca_mult']}), N={n_t:.4f} (x{config_dict['n_mult']}), C={c_t:.4f} (x{config_dict['c_mult']})")
     
-    # # 3) 解析概率點
-    # ca_pts, n_pts, c_pts = atom_pick.parse_probabilities(probability_file_atom, ca_t, n_t, c_t)
-    # print(f"After Thresholding：CA: len({ca_pts}), N: len({n_pts}), C: len({c_pts})\n")
+    # 3) 解析概率點
+    ca_pts, n_pts, c_pts = atom_pick.parse_probabilities(probability_file_atom, ca_t, n_t, c_t)
+    print(f"After Thresholding：CA: {len(ca_pts)}, N: {len(n_pts)}, C: {len(c_pts)}\n")
 
-    # # 4) NMS
-    # ca_nms,ca_final_r = atom_pick.nms_kdtree_adaptive(ca_pts,config_dict['nms_radius'], max_points=target_coverage)
-    # n_nms,n_final_r  = atom_pick.nms_kdtree_adaptive(n_pts, config_dict['nms_radius'], max_points=int(target_coverage))
-    # c_nms,c_final_r  = atom_pick.nms_kdtree_adaptive(c_pts, config_dict['nms_radius'], max_points=target_coverage)
-    # print(f"After NMS：CA: len({ca_nms}), N: len({n_nms}), C: len({c_nms})\n")
-    # print(f"CA_final_nms_r:{ca_final_r},N_final_nms_r:{n_final_r},C_final_nms_r:{c_final_r}\n")
+    # 4) NMS
+    ca_nms,ca_final_r = atom_pick.nms_kdtree_adaptive(ca_pts,config_dict['nms_radius'], max_points=target_coverage)
+    n_nms,n_final_r  = atom_pick.nms_kdtree_adaptive(n_pts, config_dict['nms_radius'], max_points=int(target_coverage))
+    c_nms,c_final_r  = atom_pick.nms_kdtree_adaptive(c_pts, config_dict['nms_radius'], max_points=target_coverage)
+    print(f"After NMS：CA: {len(ca_nms)}, N: {len(n_nms)}, C: {len(c_nms)}\n")
+    print(f"CA_final_nms_r:{ca_final_r},N_final_nms_r:{n_final_r},C_final_nms_r:{c_final_r}\n")
 
-    # # output
-    # atom_pick.write_centroid_file(ca_nms, split_output_ca)
-    # atom_pick.write_centroid_file(n_nms, split_output_n)
-    # atom_pick.write_centroid_file(c_nms, split_output_c)
+    # output
+    atom_pick.write_centroid_file(ca_nms, split_output_ca)
+    atom_pick.write_centroid_file(n_nms, split_output_n)
+    atom_pick.write_centroid_file(c_nms, split_output_c)
 
     ##################################################################################
     
@@ -216,8 +215,8 @@ def extract_probs_cords_from_atom_amino(config_dict):
         probability_file_atom=probability_file_atom_spilt_ca,   # 原本使用 probability_file_atom
         probability_file_amino_atom_common=probability_file_amino_atom_common_emi, 
         probability_file_amino=probability_file_amino, 
-        s_c=save_cords, threshold = config_dict['threshold'], 
-        # s_c=save_cords, threshold = ca_t,
+        # s_c=save_cords, threshold = config_dict['threshold'], 
+        s_c=save_cords, threshold = ca_t,
         probability_file_amino_atom_common_ca_prob=probability_file_amino_atom_common_ca_prob)
 
 ##################################################################################
@@ -276,7 +275,9 @@ def main():
     
     # 進行預測
     make_predictions(config_dict)
-    
+    target_path = f"{config_dict['input_data_dir']}/{config_dict['density_map_name']}"
+    os.chdir(target_path)
+
     ############ v2 新增
     print("\nExtracting CA") # 得到原始ca的pdb和mac檔案
     extract_ca_from_prediction_probabilities(config_dict)

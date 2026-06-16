@@ -1,7 +1,6 @@
-density_map_name: '27094'
-input_data_dir: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/all_output/change_e_new_parms_true_fasta_output/input' # provide absolute path of input directory
-# amino_checkpoint: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models/amino_acid_type.ckpt' # provide absolute path of amino acid checkpoint
-amino_checkpoint: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models/amino_acid_type.ckpt'
+density_map_name: '24794'
+input_data_dir: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/input' # provide absolute path of input directory
+amino_checkpoint: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models/amino_acid_type.ckpt' # provide absolute path of amino acid checkpoint
 atom_checkpoint: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models/atom_type.ckpt' # provide absolute path of atom checkpoint
 confidence_score_models: '/media/ray-suen/TRANSCEND1/huei/Cryo2Struct2/models' # provide absolute path of models directory
 infer_run_on: 'gpu' # options- cpu or gpu
@@ -12,17 +11,17 @@ use_sequence: 'full' # options- full or atomic_chain
 std_lambda: 10
 reverse_seq: False # 設定胺基酸序列的輸出要倒序還是正序(正序為F 反序為N)
 
-split_mod: 2 # 1是取最大機率值  2是取0.4當作標準
-CA_C_DIST: 2  # C–CA 最大允許距離
-CA_N_DIST: 2  # N–CA 最大允許距離
+# split_mod: 2 # 1是取最大機率值  2是取0.4當作標準
+# CA_C_DIST: 2  # C–CA 最大允許距離
+# CA_N_DIST: 2  # N–CA 最大允許距離
 
-# # new parms
-# coverage_factor : 1.4
-# ca_mult : 0.8
-# n_mult : 0.8
-# c_mult : 0.8
+# new parms
+coverage_factor : 1.4
+ca_mult : 0.8
+n_mult : 0.8
+c_mult : 0.8
 
-# nms_radius : 1.5
+nms_radius : 1.5
 
 bond_matching:
   # ---- 半徑 ----
